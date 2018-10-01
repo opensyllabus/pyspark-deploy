@@ -1,7 +1,15 @@
 ---
 
 - name: Deploy Spark
-  hosts: all
+  hosts: localhost
+  tasks:
+    - name: Provision cluster
+      terraform:
+        project_path: '{{ playbook_dir }}/terraform'
+        state: present
+
+- name: Deploy Spark
+  hosts: spark
   # So we can wait for SSH.
   gather_facts: no
   become: yes
