@@ -1,10 +1,9 @@
 ---
 
-- name: Deploy Spark
+- name: Provision cluster
   hosts: localhost
   tasks:
-    - name: Provision cluster
-      terraform:
+    - terraform:
         project_path: '{{ playbook_dir }}/terraform'
         state: present
 
