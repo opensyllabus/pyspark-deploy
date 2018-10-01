@@ -4,5 +4,5 @@
   hosts: localhost
   tasks:
     - terraform:
-        project_path: '{{ playbook_dir }}/terraform'
+        project_path: terraform/spark
         state: absent
