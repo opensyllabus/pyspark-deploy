@@ -1,6 +1,0 @@
-
-.terraform
-*.tfstate*
-*.tfvars
-.inventory
-.master-ip
