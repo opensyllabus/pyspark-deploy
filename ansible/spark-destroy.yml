@@ -1,0 +1,8 @@
+---
+
+- name: Destroy cluster
+  hosts: localhost
+  tasks:
+    - terraform:
+        project_path: '{{ playbook_dir }}/terraform'
+        state: absent

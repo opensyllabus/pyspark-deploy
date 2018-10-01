@@ -1,6 +1,6 @@
 ---
 
-- name: Provision cluster
+- name: Create cluster
   hosts: localhost
   tasks:
     - terraform:
@@ -9,7 +9,6 @@
 
 - name: Deploy Spark
   hosts: spark
-  # So we can wait for SSH.
   gather_facts: no
   become: yes
   roles:
