@@ -31,11 +31,6 @@ spark_public_dns: >
 
 spark_max_files: 100000
 
-spark_default_parallelism: '{{
-  spark_worker_count|int *
-  spark_worker_cpu_count|int
-}}'
-
 spark_docker_env:
   SPARK_ENV: prod
 

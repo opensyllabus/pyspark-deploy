@@ -110,15 +110,29 @@ resource "aws_instance" "worker" {
   }
 }
 
+# resource "aws_spot_instance_request" "worker" {
+#   ami                         = "${var.base_ami}"
+#   instance_type               = "${var.worker_instance_type}"
+#   subnet_id                   = "${module.vpc.subnet_id}"
+#   vpc_security_group_ids      = ["${aws_security_group.spark.id}"]
+#   key_name                    = "${module.vpc.key_name}"
+#   associate_public_ip_address = true
+#   wait_for_fulfillment        = true
+#
+#   count = "${var.worker_count}"
+#
+#   tags {
+#     Name = "spark-worker"
+#   }
+# }
+
 data "template_file" "inventory" {
   template = "${file("${path.module}/inventory.tpl")}"
 
   vars {
     master_ip              = "${aws_instance.master.public_ip}"
     worker_ips             = "${join("\n", aws_instance.worker.*.public_ip)}"
-    aws_region             = "${module.vpc.aws_region}"
     master_private_dns     = "${aws_instance.master.private_dns}"
-    first_worker_id        = "${aws_instance.worker.0.id}"
     driver_memory          = "${var.driver_memory}"
     driver_max_result_size = "${var.driver_max_result_size}"
     executor_memory        = "${var.executor_memory}"
