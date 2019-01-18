@@ -29,3 +29,6 @@ spark.driver.maxResultSize {{ tf_driver_max_result_size }}
 
 # More connections for parquet on s3a.
 spark.hadoop.fs.s3a.connection.maximum {{ spark_s3a_connection_maximum }}
+
+# shuffle partitions
+spark.sql.shuffle.partitions {{spark_sql_shuffle_partitions}}

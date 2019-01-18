@@ -34,6 +34,7 @@ spark_public_dns: >
    wget -q -O - http://169.254.169.254/latest/meta-data/local-ipv4`
 
 spark_max_files: 100000
+spark_sql_shuffle_partitions: 2000
 
 spark_docker_env:
   SPARK_ENV: prod
