@@ -1,3 +1,3 @@
 #!/bin/sh
 
-open http://`head -n 1 .master-ip`:8080
+echo http://`head -n 1 .master-ip`:8080
