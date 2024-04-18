@@ -4,6 +4,7 @@ import json
 import yaml
 import subprocess
 import click
+import webbrowser
 
 from typing import Optional, List
 from pydantic import BaseModel
@@ -197,7 +198,7 @@ def login():
 def web_admin():
     """Open the Spark web UI.
     """
-    subprocess.run(['open', f'http://{read_master_ip()}:8080'])
+    webbrowser.open(f'http://{read_master_ip()}:8080')
 
 
 if __name__ == '__main__':
