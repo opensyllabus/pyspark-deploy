@@ -1,4 +1,4 @@
 #!/bin/sh
 
 terraform init
-poetry install
+poetry install --no-root
