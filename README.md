@@ -1,96 +1,71 @@
 
-# pyspark-deploy
+# Spark deploy
 
-This project automates the process of provisioning and deploying a standalone Spark cluster on EC2 spot instances. This is designed with small teams / organizations in mind, where there isn't budget to maintain permanent infrastructure - everything is optimized around making it easy to spin up a cluster, run jobs, and then immediately terminate the AWS resources on completion. 
-
-Once the Docker image is pushed to ECR, deploys generally take ~2 minutes.
-
-- [**Docker**](https://www.docker.com/) is used to wrap up a complete Python + Java + Spark environment, making it easy to develop locally and then deploy an identical environment to a cluster. Just extend the base image and add you code. (Or, if needed, build a totally custom image from scratch.)
-
-- [**Terraform**](https://www.terraform.io/) is used to provision instances on AWS.
-
-- [**Ansible**](https://www.ansible.com/) is used to configure the cluster. Since the application environment is wrapped up in Docker, Ansible just pulls the image on the nodes, injects production config values, and starts the Spark services.
+This directory contains a Terraform project for deploying Spark clusters.
 
 ## Setup
 
-1. On the host machine, install:
+1. Install [Terraform](https://www.terraform.io/) and [Poetry](https://python-poetry.org/).
+1. Run `./setup.sh` to initialize the Terraform and Poetry projects.
 
-    - [Poetry](https://python-poetry.org/)
-    - [Terraform](https://www.terraform.io/) (>= 0.12.28)
+Create a filed in this directory called `secrets.auto.tfvars` with the three required credentials:
 
-1. Add this repository as a submodule in your project. Eg, under `/deploy` at the root level.
+```hlcl
+aws_access_key_id     = "XXX"
+aws_secret_access_key = "XXX"
+wandb_api_key         = "XXX"
+```
 
-1. Change into the directory, and run `./setup.sh`. This will initialize the Terraform project and install the Python dependencies.
+In the parent directory, create a directory called `cluster/` and add a file called `default.tfvars`. This file contains default variables that will be applied to all clusters. Generally it makes sense to define at least these four variables, which are required:
 
-1. Add a `cluster.yml` file in the parent directory - `cp config.yml.changeme ../config.yml` (the root directory of your project, tracked in git). Fill in values for the required fields:
+```hcl
+ecr_server    = "XXX.dkr.ecr.us-east-1.amazonaws.com"
+ecr_repo      = "XXX:latest"
+aws_vpc_id    = "vpc-XXX"
+aws_subnet_id = "subnet-XXX"
+```
 
-    ```python
-    aws_vpc_id: str
-    aws_subnet_id: str
-    aws_ami: str
-    public_key_path: str
-    docker_image: str
-    aws_access_key_id: str
-    aws_secret_access_key: str
-    ```
+Then, custom cluster "profiles" can be defined as `.tfvars` files under `../cluster/profiles/`. For example, if a project needs a CPU cluster for ETL jobs and a GPU cluster for model inference, these could be defined with two profiles like -
 
-    For full reference on the supported fields, see the `ClusterConfig` class in `cluster.py`, a [pydantic](https://pydantic-docs.helpmanual.io/) model that defines the configuration schema.
+`../cluster/profiles/cpu.tfvars`
 
-    **Note:** pyspark-deploy assumes the Docker image is pushed to an ECR repository, and that the provided AWS keypair has permissions to pull the image.
+```hcl
+spot_worker_count    = 30
+worker_instance_type = "m5d.metal"
+executor_memory      = "360g"
+```
 
-    **Note:** For secret values like `aws_access_key_id`, it's recommended to use Ansible vault to encrypt the values. (See - [Single Encrypted Variable](https://docs.ansible.com/ansible/2.3/playbooks_vault.html#single-encrypted-variable)). pyspark-deploy will automatically decrypt these values at deploy time. If you do this, it generally also makes sense to put the vault password in a file (eg, `~/.vault-pw.txt`), and then set the `ANSIBLE_VAULT_PASSWORD_FILE` environment variable. This avoids having to manually enter the password each time a cluster is created.
+`../cluster/profiles/gpu.tfvars`
+
+```hcl
+on_demand_worker_count = 10
+gpu_workers            = true
+worker_instance_type   = "g4dn.2xlarge"
+executor_memory        = "28g"
+```
 
 ## Usage
 
-Control the cluster with `./cluster.sh`:
+Then, use `./cluster.sh <command>` to control the cluster.
 
-```bash
-Usage: pyspark_deploy.py [OPTIONS] COMMAND [ARGS]...
+### `./cluster.sh create <profile>`
+ 
+Create a cluster. If a profile name is passed, the variables in the corresponding `.tfvars` file under `../cluster/profiles/` will be added as overrides to the Terraform configuration.
 
-Options:
-  --help  Show this message and exit.
+The `create` command will apply the Terraform configuration and then tail the outputs of the `/var/log/cloud-init-output.log` file on the master node, to give some visibility onto the state of the startup process. When cloud-init finishes, the command will exit.
 
-Commands:
-  create     Start a cluster.
-  destroy    Destroy the cluster.
-  login      SSH into the master node.
-  web-admin  Open the Spark web UI.
-```
+### `./cluster.sh destroy`
+ 
+Destroy the cluster
 
-Generally the workflow looks like:
+### `./cluster.sh login`
+ 
+SSH into the master node.
 
-- Develop locally in Docker. When ready to deploy, push the Docker image to the ECR repository specified in `docker_image`.
-- Run `./cluster.sh create`, then `./cluster.sh login` once the cluster is up.
-- Run jobs.
-- Tear down with `./cluster.sh destroy`.
+### `./cluster.sh admin`
+ 
+Open the Spark web UI in a browser.
 
-## Profiles
-
-It's common to need a handful of cluster "profiles" for a single project. Eg, you might have some jobs / workflows that need a small number of modest worker instances; but other jobs that need a large number of big workers, and others that need GPU workers. To support this, the `cluster.yml` file can container any number of named "profiles," which can provide override values that customize the cluster loadout.
-
-```yaml
-profiles:
-
-  cpu_small:
-    worker_count: 3
-    worker_instance_type: m5a.8xlarge
-    worker_spot_price: 0.8
-    executor_memory: 100g
-
-  cpu_big:
-    worker_count: 10
-    worker_instance_type: r5n.16xlarge
-    worker_spot_price: 1.6
-    executor_memory: 480g
-
-  gpu:
-    worker_count: 5
-    worker_instance_type: p3.2xlarge
-    worker_docker_runtime: nvidia
-    worker_spot_price: 1.0
-    executor_memory: 40g
-```
-
-Then, when creating a cluster, just pass the profile name, and these values will be merged into the configuration used to deploy the cluster:
-
-`./cluster.sh create gpu`
+### `./cluster.sh cat-cloudinit-log`
+ 
+Download the `cloud-init-output.log` file from the master node. Useful for debugging cluster startup problems.
