@@ -76,7 +76,7 @@ class Cluster:
         """
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(self.master_dns, username='ubuntu', timeout=60*3)
+        client.connect(self.master_dns, username='ubuntu', timeout=60*10)
         return client
 
     def cat_cloudinit_log(self) -> str:
