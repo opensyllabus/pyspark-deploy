@@ -4,6 +4,7 @@ import json
 import requests
 import paramiko
 import re
+import shlex
 
 from typing import Optional, Iterator
 from pathlib import Path
@@ -105,6 +106,26 @@ class Cluster:
             if re.search(r'Cloud-init .* finished', line):
                 break
 
+    def exec_in_container(self, command: str) -> int:
+        """Run a command in the Spark container on the master node, streaming
+        output until it exits. Returns the exit status.
+        """
+        with self.ssh_client() as client:
+
+            # Keep the connection alive through long-running jobs.
+            client.get_transport().set_keepalive(30)
+
+            # Use a pty so stderr is merged into the streamed output.
+            _, stdout, _ = client.exec_command(
+                f'sudo docker exec spark bash -lc {shlex.quote(command)}',
+                get_pty=True,
+            )
+
+            for line in stdout:
+                print(line, end='')
+
+            return stdout.channel.recv_exit_status()
+
 
 def read_master_dns():
     """Read the master IP out of the TF state.
@@ -114,6 +135,45 @@ def read_master_dns():
 
 
 app = typer.Typer()
+
+
+def terraform(
+    action: str,
+    profile: Optional[str] = None,
+    auto_approve: bool = False,
+) -> int:
+    """Run `terraform apply` or `terraform destroy` with the default and
+    (optionally) profile variable files. Returns the exit code.
+    """
+    cmd = [
+        'terraform', action,
+        '-var-file', CONFIG_DIR / 'default.tfvars',
+    ]
+
+    if profile is not None:
+        cmd += [
+            '-var-file', CONFIG_DIR / 'profiles' / f'{profile}.tfvars'
+        ]
+
+    if auto_approve:
+        cmd.append('-auto-approve')
+
+    return subprocess.run(cmd).returncode
+
+
+def wait_for_cluster() -> Cluster:
+    """Tail the cloud-init log on the master node until the cluster is up.
+    """
+    cluster = Cluster.from_tfstate()
+
+    logger.info('Tailing `cloud-init-output.log` on the master node...')
+
+    for line in cluster.tail_cloutinit_log_until_finished():
+        print(line)
+
+    logger.info('Cluster up 🚀🚀')
+
+    return cluster
 
 
 @app.command()
@@ -126,37 +186,65 @@ def create(profile: Optional[str] = typer.Argument(None)):
 
     `../cluster/profiles/<profile>.tfvars`
     """
-
-    cmd = [
-        'terraform', 'apply',
-        '-var-file', CONFIG_DIR / 'default.tfvars',
-    ]
-
-    if profile is not None:
-        cmd += [
-            '-var-file', CONFIG_DIR / 'profiles' / f'{profile}.tfvars'
-        ]
-
-    subprocess.run(cmd)
-
-    cluster = Cluster.from_tfstate()
-
-    logger.info('Tailing `cloud-init-output.log` on the master node...')
-
-    for line in cluster.tail_cloutinit_log_until_finished():
-        print(line)
-
-    logger.info('Cluster up 🚀🚀')
+    terraform('apply', profile)
+    wait_for_cluster()
 
 
 @app.command()
 def destroy():
     """Destroy the cluster.
     """
-    subprocess.run([
-        'terraform', 'destroy',
-        '-var-file', CONFIG_DIR / 'default.tfvars',
-    ])
+    terraform('destroy')
+
+
+@app.command()
+def run(
+    command: str = typer.Argument(
+        ...,
+        help='Shell command to run in the Spark container on the master, '
+             'eg: "spark-submit s3a://bucket/job.py".',
+    ),
+    profile: Optional[str] = typer.Option(
+        None,
+        '--profile', '-p',
+        help='Cluster profile, as in `create`.',
+    ),
+    keep: bool = typer.Option(
+        False,
+        '--keep',
+        help='Leave the cluster up after the job finishes.',
+    ),
+):
+    """Create a cluster, run a command on it, and destroy the cluster when the
+    command finishes, whether it succeeds, fails, or is interrupted. Exits
+    with the command's exit code.
+    """
+    exit_code = 1
+
+    try:
+        if terraform('apply', profile, auto_approve=True) != 0:
+            raise RuntimeError('`terraform apply` failed.')
+
+        cluster = wait_for_cluster()
+
+        logger.info(f'Running: {command}')
+        exit_code = cluster.exec_in_container(command)
+        logger.info(f'Command exited with code {exit_code}.')
+
+    finally:
+        if keep:
+            logger.warning('Leaving the cluster up (--keep).')
+
+        # Destroy even after a failed or partial apply, which can leave
+        # resources behind.
+        elif terraform('destroy', profile, auto_approve=True) != 0:
+            logger.error(
+                'Destroy failed, the cluster may still be running! '
+                'Run `./cluster.sh destroy` to retry.'
+            )
+            exit_code = exit_code or 1
+
+    raise typer.Exit(exit_code)
 
 
 @app.command()
