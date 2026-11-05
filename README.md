@@ -64,6 +64,8 @@ Create a cluster, run a command on it, and destroy the cluster when the command 
 
 The cluster is destroyed whether the command succeeds, fails, or is interrupted with Ctrl-C, without a confirmation prompt, and `run` exits with the command's exit code. Pass `--keep` to leave the cluster up. If the destroy fails, an error is logged; use `./cluster.sh destroy` to retry.
 
+All output (Terraform, the cloud-init log, and the command) is also saved to `logs/<timestamp>-<profile>.log` in this directory, so it's available for debugging after the cluster is gone. Executor logs, which live on the workers, are not captured.
+
 This runs from your machine, so it needs to stay connected until the job finishes.
 
 ### `./cluster.sh destroy`

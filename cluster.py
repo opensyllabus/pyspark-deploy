@@ -6,7 +6,8 @@ import paramiko
 import re
 import shlex
 
-from typing import Optional, Iterator
+from datetime import datetime
+from typing import Optional, Iterator, TextIO
 from pathlib import Path
 from dataclasses import dataclass
 from loguru import logger
@@ -14,7 +15,19 @@ from loguru import logger
 
 ROOT_DIR = Path(__file__).parent
 CONFIG_DIR = ROOT_DIR.parent / 'cluster'
+LOG_DIR = ROOT_DIR / 'logs'
 CLOUDINIT_LOG_PATH = '/var/log/cloud-init-output.log'
+
+
+def emit(line: str, log: Optional[TextIO] = None, end: str = '\n'):
+    """Print a line, and also write it to `log` if given. Flushes the log so
+    that it is complete even if the process dies mid-job.
+    """
+    print(line, end=end)
+
+    if log is not None:
+        log.write(line + end)
+        log.flush()
 
 
 def read_terraform_output(src: str, key: str):
@@ -106,9 +119,14 @@ class Cluster:
             if re.search(r'Cloud-init .* finished', line):
                 break
 
-    def exec_in_container(self, command: str) -> int:
+    def exec_in_container(
+        self,
+        command: str,
+        log: Optional[TextIO] = None,
+    ) -> int:
         """Run a command in the Spark container on the master node, streaming
-        output until it exits. Returns the exit status.
+        output (and writing it to `log`, if given) until it exits. Returns the
+        exit status.
         """
         with self.ssh_client() as client:
 
@@ -122,7 +140,7 @@ class Cluster:
             )
 
             for line in stdout:
-                print(line, end='')
+                emit(line, log, end='')
 
             return stdout.channel.recv_exit_status()
 
@@ -141,9 +159,11 @@ def terraform(
     action: str,
     profile: Optional[str] = None,
     auto_approve: bool = False,
+    log: Optional[TextIO] = None,
 ) -> int:
     """Run `terraform apply` or `terraform destroy` with the default and
-    (optionally) profile variable files. Returns the exit code.
+    (optionally) profile variable files. If `log` is given, the output is also
+    written to it. Returns the exit code.
     """
     cmd = [
         'terraform', action,
@@ -158,10 +178,22 @@ def terraform(
     if auto_approve:
         cmd.append('-auto-approve')
 
-    return subprocess.run(cmd).returncode
+    if log is None:
+        return subprocess.run(cmd).returncode
+
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ) as proc:
+        for line in proc.stdout:
+            emit(line, log, end='')
+
+    return proc.returncode
 
 
-def wait_for_cluster() -> Cluster:
+def wait_for_cluster(log: Optional[TextIO] = None) -> Cluster:
     """Tail the cloud-init log on the master node until the cluster is up.
     """
     cluster = Cluster.from_tfstate()
@@ -169,7 +201,7 @@ def wait_for_cluster() -> Cluster:
     logger.info('Tailing `cloud-init-output.log` on the master node...')
 
     for line in cluster.tail_cloutinit_log_until_finished():
-        print(line)
+        emit(line, log)
 
     logger.info('Cluster up 🚀🚀')
 
@@ -221,28 +253,39 @@ def run(
     """
     exit_code = 1
 
-    try:
-        if terraform('apply', profile, auto_approve=True) != 0:
-            raise RuntimeError('`terraform apply` failed.')
+    LOG_DIR.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    log_path = LOG_DIR / f'{stamp}-{profile or "default"}.log'
 
-        cluster = wait_for_cluster()
+    logger.info(f'Saving logs to {log_path}')
 
-        logger.info(f'Running: {command}')
-        exit_code = cluster.exec_in_container(command)
-        logger.info(f'Command exited with code {exit_code}.')
+    with open(log_path, 'w') as log:
+        try:
+            emit(f'$ {command}', log)
 
-    finally:
-        if keep:
-            logger.warning('Leaving the cluster up (--keep).')
+            if terraform('apply', profile, auto_approve=True, log=log) != 0:
+                raise RuntimeError('`terraform apply` failed.')
 
-        # Destroy even after a failed or partial apply, which can leave
-        # resources behind.
-        elif terraform('destroy', profile, auto_approve=True) != 0:
-            logger.error(
-                'Destroy failed, the cluster may still be running! '
-                'Run `./cluster.sh destroy` to retry.'
-            )
-            exit_code = exit_code or 1
+            cluster = wait_for_cluster(log)
+
+            logger.info(f'Running: {command}')
+            exit_code = cluster.exec_in_container(command, log)
+            logger.info(f'Command exited with code {exit_code}.')
+
+        finally:
+            if keep:
+                logger.warning('Leaving the cluster up (--keep).')
+
+            # Destroy even after a failed or partial apply, which can leave
+            # resources behind.
+            elif terraform('destroy', profile, auto_approve=True, log=log):
+                logger.error(
+                    'Destroy failed, the cluster may still be running! '
+                    'Run `./cluster.sh destroy` to retry.'
+                )
+                exit_code = exit_code or 1
+
+            logger.info(f'Logs saved to {log_path}')
 
     raise typer.Exit(exit_code)
 
