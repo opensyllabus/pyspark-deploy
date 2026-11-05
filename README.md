@@ -54,6 +54,20 @@ Create a cluster. If a profile name is passed, the variables in the correspondin
 
 The `create` command will apply the Terraform configuration and then tail the outputs of the `/var/log/cloud-init-output.log` file on the master node, to give some visibility onto the state of the startup process. When cloud-init finishes, the command will exit.
 
+### `./cluster.sh run [--profile <profile>] [--keep] <command>`
+
+Create a cluster, run a command on it, and destroy the cluster when the command finishes. The command runs in the Spark container on the master node (with the cluster's Spark config), and its output is streamed to the terminal. For example -
+
+```sh
+./cluster.sh run --profile cpu "spark-submit s3a://bucket/job.py"
+```
+
+The cluster is destroyed whether the command succeeds, fails, or is interrupted with Ctrl-C, without a confirmation prompt, and `run` exits with the command's exit code. Pass `--keep` to leave the cluster up. If the destroy fails, an error is logged; use `./cluster.sh destroy` to retry.
+
+All output (Terraform, the cloud-init log, and the command) is also saved to `logs/<timestamp>-<profile>.log` in this directory, so it's available for debugging after the cluster is gone. Executor logs, which live on the workers, are not captured.
+
+This runs from your machine, so it needs to stay connected until the job finishes.
+
 ### `./cluster.sh destroy`
  
 Destroy the cluster
