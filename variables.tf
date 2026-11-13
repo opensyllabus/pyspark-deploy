@@ -61,6 +61,11 @@ variable "on_demand_worker_count" {
   default = 0
 }
 
+# Launch the `spot_worker_count` workers as on-demand instances instead.
+variable "spot_as_on_demand" {
+  default = false
+}
+
 variable "gpu_workers" {
   default = false
 }
