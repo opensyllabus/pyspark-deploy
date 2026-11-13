@@ -160,10 +160,12 @@ def terraform(
     profile: Optional[str] = None,
     auto_approve: bool = False,
     log: Optional[TextIO] = None,
+    ondemand: bool = False,
 ) -> int:
     """Run `terraform apply` or `terraform destroy` with the default and
-    (optionally) profile variable files. If `log` is given, the output is also
-    written to it. Returns the exit code.
+    (optionally) profile variable files. If `ondemand` is set, the profile's
+    spot workers are launched as on-demand instances instead. If `log` is
+    given, the output is also written to it. Returns the exit code.
     """
     cmd = [
         'terraform', action,
@@ -174,6 +176,9 @@ def terraform(
         cmd += [
             '-var-file', CONFIG_DIR / 'profiles' / f'{profile}.tfvars'
         ]
+
+    if ondemand:
+        cmd += ['-var', 'spot_as_on_demand=true']
 
     if auto_approve:
         cmd.append('-auto-approve')
@@ -193,6 +198,18 @@ def terraform(
     return proc.returncode
 
 
+def parse_market(market: Optional[str]) -> bool:
+    """Return True for "ondemand", False for None or "spot".
+    """
+    if market is None or market == 'spot':
+        return False
+    if market == 'ondemand':
+        return True
+    raise typer.BadParameter(
+        f'Unknown market "{market}", expected "spot" or "ondemand".'
+    )
+
+
 def wait_for_cluster(log: Optional[TextIO] = None) -> Cluster:
     """Tail the cloud-init log on the master node until the cluster is up.
     """
@@ -209,7 +226,13 @@ def wait_for_cluster(log: Optional[TextIO] = None) -> Cluster:
 
 
 @app.command()
-def create(profile: Optional[str] = typer.Argument(None)):
+def create(
+    profile: Optional[str] = typer.Argument(None),
+    market: Optional[str] = typer.Argument(
+        None,
+        help='Pass "ondemand" to launch spot workers as on-demand instances.',
+    ),
+):
     """Create a cluster using default variables defined in:
 
     `../cluster/default.tfvars`
@@ -217,8 +240,10 @@ def create(profile: Optional[str] = typer.Argument(None)):
     If a "profile" is passed, also inject variables defined at:
 
     `../cluster/profiles/<profile>.tfvars`
+
+    eg: `./cluster.py create 5 ondemand`
     """
-    terraform('apply', profile)
+    terraform('apply', profile, ondemand=parse_market(market))
     wait_for_cluster()
 
 
@@ -246,6 +271,11 @@ def run(
         '--keep',
         help='Leave the cluster up after the job finishes.',
     ),
+    ondemand: bool = typer.Option(
+        False,
+        '--ondemand',
+        help='Launch spot workers as on-demand instances, as in `create`.',
+    ),
 ):
     """Create a cluster, run a command on it, and destroy the cluster when the
     command finishes, whether it succeeds, fails, or is interrupted. Exits
@@ -263,7 +293,9 @@ def run(
         try:
             emit(f'$ {command}', log)
 
-            if terraform('apply', profile, auto_approve=True, log=log) != 0:
+            if terraform(
+                'apply', profile, auto_approve=True, log=log, ondemand=ondemand,
+            ) != 0:
                 raise RuntimeError('`terraform apply` failed.')
 
             cluster = wait_for_cluster(log)
@@ -278,7 +310,10 @@ def run(
 
             # Destroy even after a failed or partial apply, which can leave
             # resources behind.
-            elif terraform('destroy', profile, auto_approve=True, log=log):
+            elif terraform(
+                'destroy', profile, auto_approve=True, log=log,
+                ondemand=ondemand,
+            ):
                 logger.error(
                     'Destroy failed, the cluster may still be running! '
                     'Run `./cluster.sh destroy` to retry.'

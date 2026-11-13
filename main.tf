@@ -145,7 +145,7 @@ resource "aws_instance" "workers" {
   vpc_security_group_ids      = [aws_security_group.spark.id]
   key_name                    = aws_key_pair.spark.key_name
   associate_public_ip_address = true
-  count                       = var.on_demand_worker_count
+  count                       = var.on_demand_worker_count + (var.spot_as_on_demand ? var.spot_worker_count : 0)
   user_data                   = local.worker_user_data
 
   root_block_device {
@@ -161,7 +161,7 @@ resource "aws_spot_instance_request" "workers" {
   key_name                    = aws_key_pair.spark.key_name
   associate_public_ip_address = true
   wait_for_fulfillment        = true
-  count                       = var.spot_worker_count
+  count                       = var.spot_as_on_demand ? 0 : var.spot_worker_count
   user_data                   = local.worker_user_data
 
   root_block_device {
