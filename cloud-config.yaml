@@ -111,6 +111,9 @@ write_files:
         --name spark \
         --network host \
         --env SPARK_ENV=prod \
+        --env AWS_ACCESS_KEY_ID=${aws_access_key_id} \
+        --env AWS_SECRET_ACCESS_KEY=${aws_secret_access_key} \
+        --env WANDB_API_KEY=${wandb_api_key} \
         -v /data:/data \
         -v /etc/spark/conf:/opt/spark/conf \
         -p 8080:8080 \
