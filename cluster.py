@@ -89,7 +89,7 @@ class Cluster:
             try:
                 client.connect(self.master_dns, username='ubuntu', timeout=60)
                 return client
-            except (OSError, paramiko.SSHException) as e:
+            except (OSError, paramiko.NoValidConnectionsError) as e:
                 client.close()
                 if time.monotonic() >= deadline:
                     raise
