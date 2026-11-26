@@ -116,11 +116,22 @@ locals {
   )
 }
 
+# Changing the instance type in place stops the instance first, which can hang
+# in "stopping" for the full 10m timeout. Replace it instead: terminating is
+# much faster than a graceful stop.
+resource "terraform_data" "master_instance_type" {
+  input = var.master_instance_type
+}
+
 resource "aws_instance" "master" {
   ami           = var.aws_ami
   instance_type = var.master_instance_type
   key_name      = aws_key_pair.spark.key_name
   user_data     = local.master_user_data
+
+  lifecycle {
+    replace_triggered_by = [terraform_data.master_instance_type]
+  }
 
   network_interface {
     network_interface_id = aws_network_interface.master.id

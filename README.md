@@ -68,6 +68,12 @@ All output (Terraform, the cloud-init log, and the command) is also saved to `lo
 
 This runs from your machine, so it needs to stay connected until the job finishes.
 
+### `./cluster.sh update`
+
+Pull the latest Docker image on every node of a running cluster and restart the Spark containers, without recreating the cluster. The master is restarted first, then the workers. Running jobs are killed.
+
+On each node, the cached image is removed and the Spark container is restarted via the per-boot script, so `docker run` pulls the current image. The exit code is non-zero if the update fails on any node.
+
 ### `./cluster.sh destroy`
  
 Destroy the cluster

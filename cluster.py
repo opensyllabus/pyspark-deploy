@@ -11,7 +11,7 @@ import webbrowser
 from datetime import datetime
 from typing import Optional, Iterator, TextIO
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from loguru import logger
 
 
@@ -58,10 +58,29 @@ def tail_log_file(
     client.close()
 
 
+def read_worker_dns(src: str) -> list[str]:
+    """Read the public DNS of the worker nodes from the Terraform state.
+    Workers that are stopped (eg, interrupted spot instances) have none and
+    are skipped.
+    """
+    with open(src) as fh:
+        resources = json.load(fh).get('resources', [])
+
+    return [
+        instance['attributes']['public_dns']
+        for r in resources
+        if r['type'] == 'aws_instance'
+        and r['name'] in ('workers', 'spot_workers')
+        for instance in r['instances']
+        if instance['attributes'].get('public_dns')
+    ]
+
+
 @dataclass
 class Cluster:
 
     master_dns: str
+    worker_dns: list[str] = field(default_factory=list)
 
     @classmethod
     def from_tfstate(
@@ -79,7 +98,7 @@ class Cluster:
                 'Unable to read master node DNS. Is the cluster up?'
             )
 
-        return cls(master_dns)
+        return cls(master_dns, read_worker_dns(src))
 
     @property
     def web_ui_url(self) -> str:
@@ -91,10 +110,11 @@ class Cluster:
         self,
         retry_timeout: float = 60*10,
         retry_interval: float = 5,
+        host: Optional[str] = None,
     ) -> paramiko.SSHClient:
-        """Create an SSH client to the master node, retrying until `sshd` is
-        up. Right after `terraform apply`, the instance is running but port 22
-        often refuses connections for a while.
+        """Create an SSH client to the master node (or `host`, if given),
+        retrying until `sshd` is up. Right after `terraform apply`, the
+        instance is running but port 22 often refuses connections for a while.
         """
         deadline = time.monotonic() + retry_timeout
 
@@ -102,7 +122,9 @@ class Cluster:
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             try:
-                client.connect(self.master_dns, username='ubuntu', timeout=60)
+                client.connect(
+                    host or self.master_dns, username='ubuntu', timeout=60,
+                )
                 return client
             except (
                 paramiko.AuthenticationException,
@@ -117,6 +139,26 @@ class Cluster:
                     raise
                 logger.info(f'SSH not ready ({e}), retrying...')
                 time.sleep(retry_interval)
+
+    def update_image(self, host: str) -> int:
+        """Re-pull the Docker image on a node and restart the Spark container.
+        The cached image is removed so that `docker run` in the per-boot script
+        pulls the current one. Returns the exit status.
+        """
+        command = (
+            "img=$(sudo docker inspect --format '{{.Config.Image}}' spark)"
+            ' && sudo docker stop spark'
+            ' && sudo docker rmi "$img"'
+            ' && sudo sh /var/lib/cloud/scripts/per-boot/start-spark.sh'
+        )
+
+        with self.ssh_client(host=host) as client:
+            _, stdout, _ = client.exec_command(command, get_pty=True)
+
+            for line in stdout:
+                emit(f'[{host}] {line}', end='')
+
+            return stdout.channel.recv_exit_status()
 
     def cat_cloudinit_log(self) -> str:
         """Pull `cloud-init-output.log` from the master node using Fabric.
@@ -313,6 +355,27 @@ def run(
             logger.info(f'Logs saved to {log_path}')
 
     raise typer.Exit(exit_code)
+
+
+@app.command()
+def update():
+    """Pull the latest Docker image on every node of a running cluster and
+    restart the Spark containers, without recreating the cluster. Restarts the
+    master first, then the workers. Running jobs are killed.
+    """
+    cluster = Cluster.from_tfstate()
+    failed = []
+
+    for host in [cluster.master_dns, *cluster.worker_dns]:
+        logger.info(f'Updating {host}...')
+        if cluster.update_image(host):
+            logger.error(f'Update failed on {host}.')
+            failed.append(host)
+
+    if failed:
+        raise typer.Exit(1)
+
+    logger.info('Cluster updated 🚀')
 
 
 @app.command()
