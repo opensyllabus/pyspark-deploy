@@ -7,6 +7,10 @@ resource "aws_security_group" "spark" {
   description = "Standalone Spark cluster"
   vpc_id      = var.aws_vpc_id
 
+  tags = {
+    Project = "pyspark-deploy"
+  }
+
   ingress {
     from_port   = 22
     to_port     = 22
@@ -82,6 +86,10 @@ resource "aws_key_pair" "spark" {
 resource "aws_network_interface" "master" {
   subnet_id       = var.aws_subnet_id
   security_groups = [aws_security_group.spark.id]
+
+  tags = {
+    Project = "pyspark-deploy"
+  }
 }
 
 locals {

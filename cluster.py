@@ -18,6 +18,8 @@ from loguru import logger
 ROOT_DIR = Path(__file__).parent
 CONFIG_DIR = ROOT_DIR.parent / 'cluster'
 LOG_DIR = ROOT_DIR / 'logs'
+STATE_PATH = ROOT_DIR / 'terraform.tfstate'
+DEFAULT_REGION = 'us-east-1'
 CLOUDINIT_LOG_PATH = '/var/log/cloud-init-output.log'
 
 
@@ -218,6 +220,77 @@ def terraform(
     return proc.returncode
 
 
+def aws(region: str, *args: str):
+    """Run an `aws ec2` command and return its parsed JSON output, if any.
+    """
+    out = subprocess.run(
+        ['aws', 'ec2', *args, '--region', region, '--output', 'json'],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    return json.loads(out) if out.strip() else None
+
+
+def fast_destroy(log: Optional[TextIO] = None) -> bool:
+    """Tear down the cluster without waiting for instances to terminate.
+
+    Terraform's destroy blocks until every instance is fully `terminated`,
+    which is slow. Instead, cancel the spot requests (so that AWS doesn't
+    relaunch the workers), ask AWS to terminate the instances, delete the key
+    pair, and forget the state. The security group and master network
+    interface can't be deleted until the instances are gone, so they are left
+    for `./cluster.sh clean`. Returns True on success.
+    """
+    if not STATE_PATH.exists():
+        emit('No Terraform state, nothing to destroy.', log)
+        return True
+
+    with open(STATE_PATH) as fh:
+        resources = json.load(fh)['resources']
+
+    attrs = [
+        (r['type'], i['attributes'])
+        for r in resources if r['mode'] == 'managed'
+        for i in r['instances']
+    ]
+
+    instances = [a['id'] for t, a in attrs if t == 'aws_instance']
+    spot_requests = [
+        a['spot_instance_request_id'] for t, a in attrs
+        if t == 'aws_instance' and a.get('spot_instance_request_id')
+    ]
+    keys = [a['key_name'] for t, a in attrs if t == 'aws_key_pair']
+    arns = [a['arn'] for t, a in attrs if a.get('arn')]
+    region = arns[0].split(':')[3] if arns else DEFAULT_REGION
+
+    try:
+        if spot_requests:
+            emit(f'Cancelling spot requests: {spot_requests}', log)
+            aws(region, 'cancel-spot-instance-requests',
+                '--spot-instance-request-ids', *spot_requests)
+
+        if instances:
+            emit(f'Terminating instances: {instances}', log)
+            aws(region, 'terminate-instances', '--instance-ids', *instances)
+
+        for key in keys:
+            emit(f'Deleting key pair: {key}', log)
+            aws(region, 'delete-key-pair', '--key-name', key)
+
+    except subprocess.CalledProcessError as e:
+        emit(f'AWS call failed: {e.stderr}', log)
+        return False
+
+    # Keep the old state around for debugging, but out of Terraform's way.
+    STATE_PATH.replace(STATE_PATH.with_name('terraform.tfstate.destroyed'))
+    emit('Cluster is shutting down. Run `./cluster.sh clean` later to remove '
+         'the leftover security group and network interface.', log)
+
+    return True
+
+
 def wait_for_cluster(log: Optional[TextIO] = None) -> Cluster:
     """Tail the cloud-init log on the master node until the cluster is up.
     """
@@ -249,9 +322,38 @@ def create(profile: Optional[str] = typer.Argument(None)):
 
 @app.command()
 def destroy():
-    """Destroy the cluster.
+    """Destroy the cluster. Doesn't wait for the instances to finish
+    terminating; run `clean` later to remove the leftovers.
     """
-    terraform('destroy')
+    if not fast_destroy():
+        raise typer.Exit(1)
+
+
+@app.command()
+def clean(
+    region: str = typer.Option(DEFAULT_REGION, help='AWS region.'),
+):
+    """Delete security groups and network interfaces left behind by `destroy`
+    once their instances have terminated. Anything still in use is skipped.
+    """
+    tag = 'Name=tag:Project,Values=pyspark-deploy'
+
+    enis = aws(region, 'describe-network-interfaces',
+               '--filters', tag, 'Name=status,Values=available')
+    for eni in enis['NetworkInterfaces']:
+        eni_id = eni['NetworkInterfaceId']
+        logger.info(f'Deleting network interface {eni_id}')
+        aws(region, 'delete-network-interface',
+            '--network-interface-id', eni_id)
+
+    sgs = aws(region, 'describe-security-groups', '--filters', tag)
+    for sg in sgs['SecurityGroups']:
+        sg_id = sg['GroupId']
+        try:
+            aws(region, 'delete-security-group', '--group-id', sg_id)
+            logger.info(f'Deleted security group {sg_id}')
+        except subprocess.CalledProcessError:
+            logger.info(f'Security group {sg_id} still in use, skipping.')
 
 
 @app.command()
@@ -303,7 +405,7 @@ def run(
 
             # Destroy even after a failed or partial apply, which can leave
             # resources behind.
-            elif terraform('destroy', profile, auto_approve=True, log=log):
+            elif not fast_destroy(log):
                 logger.error(
                     'Destroy failed, the cluster may still be running! '
                     'Run `./cluster.sh destroy` to retry.'
