@@ -5,6 +5,7 @@ import requests
 import paramiko
 import re
 import time
+import webbrowser
 
 from typing import Optional, Iterator
 from pathlib import Path
@@ -187,7 +188,7 @@ def login():
 def admin():
     """Open the Spark web UI.
     """
-    subprocess.run(['open', f'http://{read_master_dns()}:8080'])
+    webbrowser.open(f'http://{read_master_dns()}:8080')
 
 
 @app.command()
