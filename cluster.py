@@ -233,6 +233,19 @@ def aws(region: str, *args: str):
     return json.loads(out) if out.strip() else None
 
 
+def aws_idempotent(region: str, *args: str):
+    """Like `aws`, but treat "already gone" errors as success so that a retry
+    after a partial failure doesn't trip over completed operations.
+    """
+    try:
+        return aws(region, *args)
+    except subprocess.CalledProcessError as e:
+        if 'NotFound' in (e.stderr or ''):
+            logger.info(f'Already gone, skipping: {args[0]}')
+            return None
+        raise
+
+
 def fast_destroy(log: Optional[TextIO] = None) -> bool:
     """Tear down the cluster without waiting for instances to terminate.
 
@@ -266,18 +279,21 @@ def fast_destroy(log: Optional[TextIO] = None) -> bool:
     region = arns[0].split(':')[3] if arns else DEFAULT_REGION
 
     try:
-        if spot_requests:
-            emit(f'Cancelling spot requests: {spot_requests}', log)
-            aws(region, 'cancel-spot-instance-requests',
-                '--spot-instance-request-ids', *spot_requests)
+        # One call per ID, so that a single already-gone resource (from a
+        # previous partial attempt) doesn't fail the whole batch.
+        for request in spot_requests:
+            emit(f'Cancelling spot request: {request}', log)
+            aws_idempotent(region, 'cancel-spot-instance-requests',
+                           '--spot-instance-request-ids', request)
 
-        if instances:
-            emit(f'Terminating instances: {instances}', log)
-            aws(region, 'terminate-instances', '--instance-ids', *instances)
+        for instance in instances:
+            emit(f'Terminating instance: {instance}', log)
+            aws_idempotent(region, 'terminate-instances',
+                           '--instance-ids', instance)
 
         for key in keys:
             emit(f'Deleting key pair: {key}', log)
-            aws(region, 'delete-key-pair', '--key-name', key)
+            aws_idempotent(region, 'delete-key-pair', '--key-name', key)
 
     except subprocess.CalledProcessError as e:
         emit(f'AWS call failed: {e.stderr}', log)
@@ -342,9 +358,12 @@ def clean(
                '--filters', tag, 'Name=status,Values=available')
     for eni in enis['NetworkInterfaces']:
         eni_id = eni['NetworkInterfaceId']
-        logger.info(f'Deleting network interface {eni_id}')
-        aws(region, 'delete-network-interface',
-            '--network-interface-id', eni_id)
+        try:
+            aws(region, 'delete-network-interface',
+                '--network-interface-id', eni_id)
+            logger.info(f'Deleted network interface {eni_id}')
+        except subprocess.CalledProcessError:
+            logger.info(f'Network interface {eni_id} still in use, skipping.')
 
     sgs = aws(region, 'describe-security-groups', '--filters', tag)
     for sg in sgs['SecurityGroups']:
