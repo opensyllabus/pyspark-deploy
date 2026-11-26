@@ -4,6 +4,7 @@ import json
 import requests
 import paramiko
 import re
+import time
 
 from typing import Optional, Iterator
 from pathlib import Path
@@ -71,13 +72,29 @@ class Cluster:
         """
         return f'http://{self.master_dns}:8080'
 
-    def ssh_client(self) -> paramiko.SSHClient:
-        """Create an SSH client to the master node.
+    def ssh_client(
+        self,
+        retry_timeout: float = 60*10,
+        retry_interval: float = 5,
+    ) -> paramiko.SSHClient:
+        """Create an SSH client to the master node, retrying until `sshd` is
+        up. Right after `terraform apply`, the instance is running but port 22
+        often refuses connections for a while.
         """
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(self.master_dns, username='ubuntu', timeout=60*10)
-        return client
+        deadline = time.monotonic() + retry_timeout
+
+        while True:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                client.connect(self.master_dns, username='ubuntu', timeout=60)
+                return client
+            except (OSError, paramiko.SSHException) as e:
+                client.close()
+                if time.monotonic() >= deadline:
+                    raise
+                logger.info(f'SSH not ready ({e}), retrying...')
+                time.sleep(retry_interval)
 
     def cat_cloudinit_log(self) -> str:
         """Pull `cloud-init-output.log` from the master node using Fabric.
