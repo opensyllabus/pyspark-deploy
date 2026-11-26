@@ -153,16 +153,29 @@ resource "aws_instance" "workers" {
   }
 }
 
-resource "aws_spot_instance_request" "workers" {
+# Spot workers use aws_instance + instance_market_options rather than
+# aws_spot_instance_request, whose destroy often hangs until the 20m timeout.
+# The persistent request with "stop" behavior means an interrupted worker is
+# stopped and restarted by AWS when capacity returns; the per-boot script in
+# cloud-config.yaml then restarts the Spark worker and it rejoins the master.
+resource "aws_instance" "spot_workers" {
   ami                         = var.aws_ami
   instance_type               = var.worker_instance_type
   subnet_id                   = var.aws_subnet_id
   vpc_security_group_ids      = [aws_security_group.spark.id]
   key_name                    = aws_key_pair.spark.key_name
   associate_public_ip_address = true
-  wait_for_fulfillment        = true
   count                       = var.spot_worker_count
   user_data                   = local.worker_user_data
+
+  instance_market_options {
+    market_type = "spot"
+
+    spot_options {
+      spot_instance_type             = "persistent"
+      instance_interruption_behavior = "stop"
+    }
+  }
 
   root_block_device {
     volume_size = var.root_vol_size
