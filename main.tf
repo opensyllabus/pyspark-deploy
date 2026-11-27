@@ -106,6 +106,9 @@ locals {
     data_dir               = var.data_dir
     spark_packages         = var.spark_packages
     master_private_ip      = aws_network_interface.master.private_ip
+    aws_region             = var.aws_region
+    security_group_id      = aws_security_group.spark.id
+    idle_shutdown_minutes  = var.idle_shutdown_minutes
   }
 }
 

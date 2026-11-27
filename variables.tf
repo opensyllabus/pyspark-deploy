@@ -82,6 +82,12 @@ variable "spark_packages" {
   ]
 }
 
+# Terminate the whole cluster once the master has been idle (no running job,
+# no active Spark app, nobody logged in) for this many minutes. 0 disables it.
+variable "idle_shutdown_minutes" {
+  default = 120
+}
+
 # Secrets
 # TODO: Use a single env_vars list / dict variable?
 
