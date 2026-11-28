@@ -125,6 +125,109 @@ write_files:
           "spark-class org.apache.spark.deploy.worker.Worker spark://${master_private_ip}:7077"
         }
 
+  # Run a command in the Spark container, detached from any SSH session so
+  # that a dropped connection doesn't affect it. Output goes to <dir>/out and
+  # the exit code to <dir>/exit (written last). If the policy is "drain",
+  # the workers are terminated when the command is done.
+  - path: /usr/local/bin/cluster-job
+    permissions: 0755
+    content: |
+      #!/bin/bash
+
+      dir=$1
+      echo $$ > $dir/pid
+
+      # Count the job itself as activity, so that one that starts and
+      # finishes between two idle checks isn't missed.
+      sudo mkdir -p /var/lib/cluster
+      sudo touch /var/lib/cluster/last-active
+
+      sudo docker exec spark bash -lc "$2" > $dir/out 2>&1
+      code=$?
+
+      sudo touch /var/lib/cluster/last-active
+
+      if [ "$(cat /home/ubuntu/jobs/policy 2>/dev/null)" = drain ]; then
+        echo "Job finished, terminating workers (policy: drain)." >> $dir/out
+        /usr/local/bin/cluster-terminate workers >> $dir/out 2>&1
+      fi
+
+      echo $code > $dir/exit
+
+  # Terminate the instances in this cluster: `workers` leaves this instance
+  # up, `all` terminates it too. Spot requests are cancelled first, because
+  # AWS would otherwise relaunch the workers.
+  - path: /usr/local/bin/cluster-terminate
+    permissions: 0755
+    content: |
+      #!/bin/sh
+
+      export AWS_ACCESS_KEY_ID=${aws_access_key_id}
+      export AWS_SECRET_ACCESS_KEY=${aws_secret_access_key}
+      export AWS_DEFAULT_REGION=${aws_region}
+
+      exclude=none
+      if [ "$1" = workers ]; then
+        exclude=$(wget -q -O - http://169.254.169.254/latest/meta-data/instance-id)
+      fi
+
+      aws ec2 describe-instances \
+        --filters \
+          "Name=instance.group-id,Values=${security_group_id}" \
+          "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+        --query "Reservations[].Instances[]|[?InstanceId!='$exclude'].[InstanceId,SpotInstanceRequestId]" \
+        --output text | while read id request; do
+          if [ "$request" != None ]; then
+            aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$request"
+          fi
+          aws ec2 terminate-instances --instance-ids "$id"
+        done
+
+  # Master only (a no-op elsewhere). Terminate the whole cluster once it has
+  # been continuously idle for the grace period. Anything unexpected, such as
+  # the Spark master not answering, counts as active.
+  - path: /usr/local/bin/cluster-idle-check
+    permissions: 0755
+    content: |
+      #!/bin/sh
+
+      [ "${master}" = true ] || exit 0
+      [ ${idle_shutdown_minutes} -gt 0 ] || exit 0
+
+      state=/var/lib/cluster/last-active
+      mkdir -p /var/lib/cluster
+      [ -f $state ] || touch $state
+
+      # Prints "active" if a Spark application is running, otherwise when
+      # the most recent one finished (epoch seconds, 0 if none). Applications
+      # that start and finish between two checks still show up as completed.
+      last=$(curl -sf --max-time 10 http://localhost:8080/json/ | \
+        python3 -c 'import json,sys; d=json.load(sys.stdin); print("active" if d["activeapps"] else max([(a["starttime"]+a["duration"])//1000 for a in d["completedapps"]] or [0]))')
+
+      # Anything unexpected counts as active.
+      case "$last" in
+        ''|active|*[!0-9]*) touch $state; exit 0 ;;
+      esac
+
+      if pgrep -f cluster-job > /dev/null || [ -n "$(who)" ]; then
+        touch $state
+        exit 0
+      fi
+
+      [ $last -gt $(stat -c %Y $state) ] && touch -d "@$last" $state
+
+      idle=$(( $(date +%s) - $(stat -c %Y $state) ))
+
+      if [ $idle -ge $(( ${idle_shutdown_minutes} * 60 )) ]; then
+        logger "cluster idle for $idle seconds, terminating"
+        exec /usr/local/bin/cluster-terminate all
+      fi
+
+  - path: /etc/cron.d/cluster-idle
+    permissions: 0644
+    content: |
+      */5 * * * * root /usr/local/bin/cluster-idle-check
+
   - path: /home/ubuntu/spark-bash.sh
     permissions: 0755
     content: |
