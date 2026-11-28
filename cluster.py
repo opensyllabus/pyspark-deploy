@@ -176,10 +176,13 @@ class Cluster:
         The cached image is removed so that `docker run` in the per-boot script
         pulls the current one. Returns the exit status.
         """
+        # The container may already be gone (eg, after an interrupted update),
+        # and `--rm` removal is asynchronous, so tolerate both. Pruning all
+        # unused images drops the cached one without needing the container.
         command = (
-            "img=$(sudo docker inspect --format '{{.Config.Image}}' spark)"
-            ' && sudo docker stop spark'
-            ' && sudo docker rmi "$img"'
+            'sudo docker stop spark >/dev/null 2>&1;'
+            ' sudo docker rm -f spark >/dev/null 2>&1;'
+            ' sudo docker image prune -a -f'
             ' && sudo sh /var/lib/cloud/scripts/per-boot/start-spark.sh'
         )
 
