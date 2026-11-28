@@ -66,8 +66,6 @@ Create a cluster and run a command on it. The cluster is left up by default; pas
 
 All output (Terraform, the cloud-init log, and the command) is also saved to `logs/<timestamp>-<profile>.log` in this directory, so it's available for debugging after the cluster is gone. Executor logs, which live on the workers, are not captured.
 
-This runs from your machine, so it needs to stay connected until the job finishes.
-
 ### `./cluster.sh update`
 
 Pull the latest Docker image on every node of a running cluster and restart the Spark containers, without recreating the cluster. The master is restarted first, then the workers. Running jobs are killed.

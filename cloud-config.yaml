@@ -137,8 +137,15 @@ write_files:
       dir=$1
       echo $$ > $dir/pid
 
+      # Count the job itself as activity, so that one that starts and
+      # finishes between two idle checks isn't missed.
+      sudo mkdir -p /var/lib/cluster
+      sudo touch /var/lib/cluster/last-active
+
       sudo docker exec spark bash -lc "$2" > $dir/out 2>&1
       code=$?
+
+      sudo touch /var/lib/cluster/last-active
 
       if [ "$(cat /home/ubuntu/jobs/policy 2>/dev/null)" = drain ]; then
         echo "Job finished, terminating workers (policy: drain)." >> $dir/out
@@ -191,19 +198,29 @@ write_files:
       mkdir -p /var/lib/cluster
       [ -f $state ] || touch $state
 
-      if curl -sf --max-time 10 http://localhost:8080/json/ | \
-           python3 -c 'import json,sys; sys.exit(1 if json.load(sys.stdin)["activeapps"] else 0)' \
-         && ! pgrep -f cluster-job > /dev/null \
-         && [ -z "$(who)" ]; then
+      # Prints "active" if a Spark application is running, otherwise when
+      # the most recent one finished (epoch seconds, 0 if none). Applications
+      # that start and finish between two checks still show up as completed.
+      last=$(curl -sf --max-time 10 http://localhost:8080/json/ | \
+        python3 -c 'import json,sys; d=json.load(sys.stdin); print("active" if d["activeapps"] else max([(a["starttime"]+a["duration"])//1000 for a in d["completedapps"]] or [0]))')
 
-        idle=$(( $(date +%s) - $(stat -c %Y $state) ))
+      # Anything unexpected counts as active.
+      case "$last" in
+        ''|active|*[!0-9]*) touch $state; exit 0 ;;
+      esac
 
-        if [ $idle -ge $(( ${idle_shutdown_minutes} * 60 )) ]; then
-          logger "cluster idle for $idle seconds, terminating"
-          exec /usr/local/bin/cluster-terminate all
-        fi
-      else
+      if pgrep -f cluster-job > /dev/null || [ -n "$(who)" ]; then
         touch $state
+        exit 0
+      fi
+
+      [ $last -gt $(stat -c %Y $state) ] && touch -d "@$last" $state
+
+      idle=$(( $(date +%s) - $(stat -c %Y $state) ))
+
+      if [ $idle -ge $(( ${idle_shutdown_minutes} * 60 )) ]; then
+        logger "cluster idle for $idle seconds, terminating"
+        exec /usr/local/bin/cluster-terminate all
       fi
 
   - path: /etc/cron.d/cluster-idle

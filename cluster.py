@@ -23,6 +23,7 @@ STATE_PATH = ROOT_DIR / 'terraform.tfstate'
 DEFAULT_REGION = 'us-east-1'
 CLOUDINIT_LOG_PATH = '/var/log/cloud-init-output.log'
 JOBS_DIR = '/home/ubuntu/jobs'
+JOB_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
 
 
 def emit(line: str, log: Optional[TextIO] = None, end: str = '\n'):
@@ -60,6 +61,32 @@ def tail_log_file(
         yield line.strip()
 
     client.close()
+
+
+def read_state_region(resources: list[dict]) -> str:
+    """The AWS region the cluster was created in, from the ARN of any
+    resource in the Terraform state (which follows `var.aws_region`).
+    """
+    for r in resources:
+        for i in r.get('instances', []):
+            arn = i['attributes'].get('arn')
+            if arn:
+                return arn.split(':')[3]
+
+    return DEFAULT_REGION
+
+
+def validate_job_id(job_id: str) -> str:
+    """Job IDs end up in remote shell commands and paths, so only allow a
+    safe basename.
+    """
+    if not JOB_ID_RE.fullmatch(job_id):
+        raise typer.BadParameter(
+            f'Invalid job ID {job_id!r}: use only letters, digits, `.`, `_` '
+            'and `-`, starting with a letter or digit.'
+        )
+
+    return job_id
 
 
 def read_worker_dns(src: str) -> list[str]:
@@ -223,7 +250,7 @@ class Cluster:
         """Start `command` in the Spark container, detached from this SSH
         session (see `cluster-job`), and wait for it to be running.
         """
-        job_dir = f'{JOBS_DIR}/{job_id}'
+        job_dir = shlex.quote(f'{JOBS_DIR}/{validate_job_id(job_id)}')
         code, _ = self.run_remote(
             f'mkdir -p {job_dir} && (setsid nohup /usr/local/bin/cluster-job '
             f'{job_dir} {shlex.quote(command)} >/dev/null 2>&1 </dev/null &);'
@@ -237,7 +264,7 @@ class Cluster:
         """Return the job's exit code, or None if it's still running. A job
         that died without recording one (eg, the master rebooted) is 255.
         """
-        job_dir = f'{JOBS_DIR}/{job_id}'
+        job_dir = shlex.quote(f'{JOBS_DIR}/{validate_job_id(job_id)}')
         _, out = self.run_remote(
             f'if [ -e {job_dir}/exit ]; then cat {job_dir}/exit;'
             f' elif kill -0 $(cat {job_dir}/pid) 2>/dev/null; then echo running;'
@@ -252,7 +279,7 @@ class Cluster:
         connection drops (or goes quiet), reconnect and resume where the
         output left off, for as long as the job is running.
         """
-        job_dir = f'{JOBS_DIR}/{job_id}'
+        job_dir = shlex.quote(f'{JOBS_DIR}/{validate_job_id(job_id)}')
         decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         offset = 0
 
@@ -392,8 +419,7 @@ def fast_destroy() -> bool:
         if t == 'aws_instance' and a.get('spot_instance_request_id')
     ]
     keys = [a['key_name'] for t, a in attrs if t == 'aws_key_pair']
-    arns = [a['arn'] for t, a in attrs if a.get('arn')]
-    region = arns[0].split(':')[3] if arns else DEFAULT_REGION
+    region = read_state_region(resources)
 
     try:
         # One call per ID, so that a single already-gone resource (from a
@@ -524,7 +550,7 @@ def run(
 
     LOG_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    job_id = f'{stamp}-{profile or "default"}'
+    job_id = validate_job_id(f'{stamp}-{profile or "default"}')
     log_path = LOG_DIR / f'{job_id}.log'
 
     logger.info(f'Saving logs to {log_path}')
@@ -646,10 +672,12 @@ def update():
     # after a `--drain` job, or spot workers stopped by an interruption), so
     # ask AWS which are actually running instead of waiting on SSH to time out.
     hosts = [cluster.master_dns, *cluster.worker_dns]
+    with open(STATE_PATH) as fh:
+        region = read_state_region(json.load(fh).get('resources', []))
     running = {
         i['PublicDnsName']
         for r in aws(
-            DEFAULT_REGION, 'describe-instances',
+            region, 'describe-instances',
             '--filters',
             f'Name=dns-name,Values={",".join(hosts)}',
             'Name=instance-state-name,Values=running',
